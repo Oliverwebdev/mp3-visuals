@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Musik Visualizer – Professionell & Innovativ</title>
+  <style>
+    /* Globales Styling & responsives Layout */
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #222;
+      color: #fff;
+      margin: 0;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      transition: background 0.3s, color 0.3s;
+    }
+    h1 { margin-bottom: 10px; }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+      margin-bottom: 20px;
+    }
+    .controls > * {
+      padding: 10px;
+      font-size: 16px;
+      border-radius: 4px;
+      border: none;
+    }
+    input, select {
+      background: #444;
+      color: #fff;
+    }
+    button {
+      background: #0088cc;
+      color: #fff;
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #666;
+      cursor: not-allowed;
+    }
+    canvas {
+      background: #000;
+      border: 1px solid #444;
+      max-width: 100%;
+      width: 800px;
+      height: 400px;
+    }
+    @media (max-width: 600px) {
+      canvas { width: 100%; height: 300px; }
+      .controls { flex-direction: column; }
+    }
+    .theme-toggle {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: #444;
+      color: #fff;
+      padding: 5px 10px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    #recordingIndicator {
+      position: fixed;
+      bottom: 10px;
+      left: 10px;
+      background: #ff0;
+      color: #000;
+      padding: 5px 10px;
+      border-radius: 4px;
+      display: none;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <!-- Dark/Light Mode Umschalter -->
+  <button class="theme-toggle" id="themeToggle">Light Mode</button>
+  
+  <h1>Musik Visualizer</h1>
+  <div class="controls">
+    <input type="file" id="audioFile" accept="audio/*" title="Wählen Sie eine MP3-Datei aus">
+    <select id="visualizerStyle" title="Wählen Sie den Visualizer-Stil">
+      <option value="bars">Balken</option>
+      <option value="wave">Wellenform</option>
+      <option value="circle">Kreis</option>
+      <option value="particles">Particles</option>
+      <option value="spiral">Spiral</option>
+      <option value="geometry">Geometry Dash</option>
+      <option value="nebula">Nebula</option>
+      <option value="digitalRain">Digital Rain</option>
+    </select>
+    <button id="startButton" title="Visualisierung starten">Visualisierung starten</button>
+    <button id="downloadButton" disabled title="Aufgenommenes Video herunterladen">Video herunterladen</button>
+  </div>
+  
+  <canvas id="visualizerCanvas" width="800" height="400" aria-label="Visualisierungs-Canvas"></canvas>
+  <!-- Audio-Element wird unsichtbar genutzt -->
+  <audio id="audio" controls style="display:none;"></audio>
+  <div id="recordingIndicator">Aufnahme läuft...</div>
+  
+  <script>
+    // Globale Elemente und Variablen
+    const audioFile = document.getElementById('audioFile');
+    const startButton = document.getElementById('startButton');
+    const downloadButton = document.getElementById('downloadButton');
+    const visualizerStyle = document.getElementById('visualizerStyle');
+    const canvas = document.getElementById('visualizerCanvas');
+    const ctx = canvas.getContext('2d');
+    const audioElement = document.getElementById('audio');
+    const recordingIndicator = document.getElementById('recordingIndicator');
+    const themeToggle = document.getElementById('themeToggle');
+    
+    let audioContext, analyser, source;
+    let dataArray, timeDataArray, bufferLength;
+    let animationId;
+    let mediaRecorder;
+    let recordedChunks = [];
+    let particles = []; // Für den Particles-Modus
+    
+    // Für Geometry Dash
+    let gdPulses = [];  // Array für aktive Beat-Pulse
+    let cubeX = 100;
+    let cubeY;
+    let cubeVelY = 0;
+    const cubeSize = 30;
+    const gravity = 0.5;
+    const jumpStrength = -10;
+    let lastBeatTime = 0;
+    const beatInterval = 300;
+    const beatThreshold = 200;
+    
+    // Für Digital Rain
+    let digitalRainColumns, digitalRainDrops, digitalRainFontSize = 16;
+    function initDigitalRain() {
+      digitalRainColumns = Math.floor(canvas.width / digitalRainFontSize);
+      digitalRainDrops = new Array(digitalRainColumns).fill(0);
+    }
+    
+    // Zustand der Visualisierung (Toggle)
+    let isRunning = false;
+    
+    // Dark/Light Mode Umschalter
+    themeToggle.addEventListener('click', function() {
+      if(document.body.style.background === 'rgb(34, 34, 34)' || document.body.style.background === '') {
+        document.body.style.background = '#f4f4f4';
+        document.body.style.color = '#000';
+        themeToggle.textContent = 'Dark Mode';
+      } else {
+        document.body.style.background = '#222';
+        document.body.style.color = '#fff';
+        themeToggle.textContent = 'Light Mode';
+      }
+    });
+    
+    // Feedback beim Datei-Upload
+    audioFile.addEventListener('change', function() {
+      const file = this.files[0];
+      if(file) {
+        const fileURL = URL.createObjectURL(file);
+        audioElement.src = fileURL;
+        alert("Datei erfolgreich geladen: " + file.name);
+      }
+    });
+    
+    // Audio-Setup – wird nur einmal initialisiert
+    function setupAudio() {
+      if (!audioContext) {
+        try {
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          analyser = audioContext.createAnalyser();
+          analyser.fftSize = 2048;
+          bufferLength = analyser.frequencyBinCount;
+          dataArray = new Uint8Array(bufferLength);
+          timeDataArray = new Uint8Array(analyser.fftSize);
+          
+          // Erstelle die Quelle nur einmal!
+          source = audioContext.createMediaElementSource(audioElement);
+          source.connect(analyser);
+          analyser.connect(audioContext.destination);
+        } catch (e) {
+          alert("AudioContext konnte nicht gestartet werden: " + e);
+        }
+      }
+    }
+    
+    /* ----------------- Visualisierungsfunktionen ----------------- */
+    
+    function drawBars() {
+      analyser.getByteFrequencyData(dataArray);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const barWidth = (canvas.width / bufferLength) * 2.5;
+      let posX = 0;
+      for(let i = 0; i < bufferLength; i++) {
+        const barHeight = dataArray[i] / 2;
+        ctx.fillStyle = `rgb(${barHeight + 100},50,150)`;
+        ctx.fillRect(posX, canvas.height - barHeight, barWidth, barHeight);
+        posX += barWidth + 1;
+      }
+    }
+    
+    function drawWaveform() {
+      analyser.getByteTimeDomainData(timeDataArray);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgb(0, 255, 0)';
+      ctx.beginPath();
+      const sliceWidth = canvas.width / timeDataArray.length;
+      let x = 0;
+      for(let i = 0; i < timeDataArray.length; i++) {
+        const v = timeDataArray[i] / 128.0;
+        const y = v * canvas.height / 2;
+        if(i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+        x += sliceWidth;
+      }
+      ctx.lineTo(canvas.width, canvas.height / 2);
+      ctx.stroke();
+    }
+    
+    function drawCircle() {
+      analyser.getByteFrequencyData(dataArray);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const radius = Math.min(canvas.width, canvas.height) / 4;
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const step = (Math.PI * 2) / bufferLength;
+      for(let i = 0; i < bufferLength; i++) {
+        const amplitude = dataArray[i] / 255;
+        const angle = step * i;
+        const x = centerX + Math.cos(angle) * (radius + amplitude * 100);
+        const y = centerY + Math.sin(angle) * (radius + amplitude * 100);
+        ctx.fillStyle = `hsl(${(i / bufferLength) * 360}, 100%, 50%)`;
+        ctx.beginPath();
+        ctx.arc(x, y, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    
+    function drawParticles() {
+      ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      analyser.getByteFrequencyData(dataArray);
+      const threshold = 200;
+      for(let i = 0; i < bufferLength; i++) {
+        if(dataArray[i] > threshold) {
+          const particle = {
+            x: canvas.width / 2,
+            y: canvas.height / 2,
+            vx: (Math.random() - 0.5) * 5,
+            vy: (Math.random() - 0.5) * 5,
+            radius: dataArray[i] / 50,
+            alpha: 1,
+            color: `hsl(${Math.floor(Math.random() * 360)}, 100%, 50%)`
+          };
+          particles.push(particle);
+        }
+      }
+      for(let i = particles.length - 1; i >= 0; i--) {
+        let p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.alpha -= 0.01;
+        if(p.alpha <= 0) {
+          particles.splice(i, 1);
+          continue;
+        }
+        ctx.save();
+        ctx.globalAlpha = p.alpha;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    
+    function drawSpiral() {
+      analyser.getByteFrequencyData(dataArray);
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      let a = 0, b = 4;
+      let angle = 0;
+      ctx.beginPath();
+      for(let i = 0; i < bufferLength; i++) {
+        const amplitude = dataArray[i] / 255;
+        let radius = a + b * angle + amplitude * 50;
+        let x = centerX + radius * Math.cos(angle);
+        let y = centerY + radius * Math.sin(angle);
+        if(i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+        angle += (Math.PI * 2) / 50;
+      }
+      ctx.strokeStyle = `hsl(${Math.floor(Math.random() * 360)}, 100%, 50%)`;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    
+    // Geometry Dash Modus – mit aktivem Pulse-System
+    function drawGeometryDash() {
+      analyser.getByteTimeDomainData(timeDataArray);
+      analyser.getByteFrequencyData(dataArray);
+      
+      // Aktualisiere bestehende Pulse: Bewegung und Dämpfung
+      for (let i = gdPulses.length - 1; i >= 0; i--) {
+        gdPulses[i].x -= 5;
+        gdPulses[i].intensity *= 0.98;
+        if(gdPulses[i].intensity < 1 || gdPulses[i].x < 0) {
+          gdPulses.splice(i, 1);
+        }
+      }
+      
+      // Zeichne den Boden (Basis aus Audio + Summierung aller Pulse)
+      ctx.beginPath();
+      for (let x = 0; x <= canvas.width; x += 5) {
+        const index = Math.floor(x / canvas.width * timeDataArray.length);
+        const baseY = canvas.height * 0.75 + ((timeDataArray[index] - 128) * 0.5);
+        let pulseEffect = 0;
+        const sigma = 50;
+        for (let pulse of gdPulses) {
+          let dx = x - pulse.x;
+          pulseEffect += pulse.intensity * Math.exp(- (dx * dx) / (2 * sigma * sigma));
+        }
+        let y = baseY - pulseEffect;
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = '#0ff';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      
+      // Beat-Erkennung
+      let lowFreqSum = 0;
+      for(let i = 0; i < 5; i++){
+         lowFreqSum += dataArray[i];
+      }
+      const lowFreqAvg = lowFreqSum / 5;
+      const now = performance.now();
+      if(lowFreqAvg > beatThreshold && (now - lastBeatTime) > beatInterval) {
+         gdPulses.push({ x: canvas.width, intensity: 50 });
+         lastBeatTime = now;
+         // Würfelsprung, wenn er auf dem Boden ist
+         let cubeIndex = Math.floor(cubeX / canvas.width * timeDataArray.length);
+         let cubeBaseY = canvas.height * 0.75 + ((timeDataArray[cubeIndex] - 128) * 0.5);
+         let cubePulseEffect = 0;
+         const sigma = 50;
+         for(let pulse of gdPulses) {
+            let dx = cubeX - pulse.x;
+            cubePulseEffect += pulse.intensity * Math.exp(- (dx * dx) / (2 * sigma * sigma));
+         }
+         let groundAtCube = cubeBaseY - cubePulseEffect;
+         if(cubeY === undefined || cubeY >= groundAtCube - 1) {
+            cubeVelY = jumpStrength;
+         }
+      }
+      
+      // Würfel-Physik
+      let cubeIndex = Math.floor(cubeX / canvas.width * timeDataArray.length);
+      let cubeBaseY = canvas.height * 0.75 + ((timeDataArray[cubeIndex] - 128) * 0.5);
+      let cubePulseEffect = 0;
+      const sigma = 50;
+      for(let pulse of gdPulses) {
+         let dx = cubeX - pulse.x;
+         cubePulseEffect += pulse.intensity * Math.exp(- (dx * dx) / (2 * sigma * sigma));
+      }
+      let groundAtCube = cubeBaseY - cubePulseEffect;
+      
+      cubeVelY += gravity;
+      cubeY = (cubeY === undefined) ? groundAtCube : cubeY + cubeVelY;
+      if(cubeY > groundAtCube) {
+         cubeY = groundAtCube;
+         cubeVelY = 0;
+      }
+      
+      ctx.fillStyle = '#ff0';
+      ctx.fillRect(cubeX - cubeSize/2, cubeY - cubeSize, cubeSize, cubeSize);
+    }
+    
+    // Nebula-Modus: Rotierende, pulsierende Farbexplosion
+    function drawNebula() {
+      analyser.getByteFrequencyData(dataArray);
+      // Erzeuge einen leichten Trail-Effekt
+      ctx.fillStyle = "rgba(0, 0, 0, 0.1)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const centerX = canvas.width / 2;
+      const centerY = canvas.height / 2;
+      const maxRadius = Math.sqrt(centerX * centerX + centerY * centerY);
+      // Berechne eine Beat-Intensität
+      let sum = 0;
+      for (let i = 0; i < dataArray.length; i++) { sum += dataArray[i]; }
+      const beatIntensity = sum / dataArray.length;
+      // Moduliere eine Rotationsgeschwindigkeit
+      const angle = (performance.now() / 1000) % (Math.PI * 2);
+      ctx.save();
+      ctx.translate(centerX, centerY);
+      ctx.rotate(angle);
+      let gradient = ctx.createRadialGradient(0, 0, maxRadius * 0.1, 0, 0, maxRadius);
+      gradient.addColorStop(0, `rgba(255, ${Math.floor(beatIntensity*2)}, 150, 0.8)`);
+      gradient.addColorStop(0.5, `rgba(100, ${Math.floor(beatIntensity*1.5)}, 255, 0.5)`);
+      gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
+      ctx.fillStyle = gradient;
+      ctx.beginPath();
+      ctx.arc(0, 0, maxRadius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+    
+    // Digital Rain-Modus: Matrix-Style fallende Zeichen, modulierter Regen
+    function drawDigitalRain() {
+      if (!digitalRainDrops) initDigitalRain();
+      // Hintergrund mit leichter Transparenz für den Trail
+      ctx.fillStyle = "rgba(0, 0, 0, 0.05)";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = "#0F0";
+      ctx.font = digitalRainFontSize + "px monospace";
+      for (let i = 0; i < digitalRainDrops.length; i++) {
+        let text = String.fromCharCode(0x30A0 + Math.random() * 96);
+        ctx.fillText(text, i * digitalRainFontSize, digitalRainDrops[i] * digitalRainFontSize);
+        // Bewege den Regen – moduliere die Geschwindigkeit mit Audio-Daten
+        let speedMod = 1;
+        if (dataArray) {
+          speedMod = dataArray[i % dataArray.length] / 128;
+        }
+        if (digitalRainDrops[i] * digitalRainFontSize > canvas.height && Math.random() > 0.975) {
+          digitalRainDrops[i] = 0;
+        }
+        digitalRainDrops[i] += speedMod;
+      }
+    }
+    
+    // Hauptzeichenschleife: Wählt anhand des ausgewählten Stils die Funktion
+    function draw() {
+      const style = visualizerStyle.value;
+      if(style !== 'particles' && style !== 'digitalRain') {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      if(style === 'bars') {
+        drawBars();
+      } else if(style === 'wave') {
+        drawWaveform();
+      } else if(style === 'circle') {
+        drawCircle();
+      } else if(style === 'particles') {
+        drawParticles();
+      } else if(style === 'spiral') {
+        drawSpiral();
+      } else if(style === 'geometry') {
+        drawGeometryDash();
+      } else if(style === 'nebula') {
+        drawNebula();
+      } else if(style === 'digitalRain') {
+        drawDigitalRain();
+      }
+      animationId = requestAnimationFrame(draw);
+    }
+    
+    // Aufzeichnung mittels MediaRecorder
+    function startRecording() {
+      const canvasStream = canvas.captureStream(30);
+      let options = { mimeType: 'video/webm; codecs=vp9' };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = { mimeType: 'video/webm; codecs=vp8' };
+      }
+      try {
+        mediaRecorder = new MediaRecorder(canvasStream, options);
+      } catch(e) {
+        alert("MediaRecorder wird nicht unterstützt: " + e);
+        return;
+      }
+      mediaRecorder.ondataavailable = function(e) {
+        if (e.data.size > 0) {
+          recordedChunks.push(e.data);
+        }
+      };
+      mediaRecorder.onstop = function() {
+        const blob = new Blob(recordedChunks, { type: options.mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'visualization.webm';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        recordedChunks = [];
+        recordingIndicator.style.display = 'none';
+      };
+      mediaRecorder.start();
+      recordingIndicator.style.display = 'block';
+    }
+    
+    /* ----------------- Event-Handler ----------------- */
+    
+    // Toggle-Button: Starten / Pausieren
+    startButton.addEventListener('click', function() {
+      if (!isRunning) {
+         setupAudio();
+         if (audioContext.state === "suspended") {
+           audioContext.resume();
+         }
+         audioElement.play();
+         if(mediaRecorder && typeof mediaRecorder.resume === 'function' && mediaRecorder.state === 'paused') {
+            mediaRecorder.resume();
+         } else {
+            startRecording();
+         }
+         // Setze spezifische Zustände zurück, falls nötig
+         if(visualizerStyle.value === 'geometry') {
+            gdPulses = [];
+            cubeY = undefined;
+            cubeVelY = 0;
+            lastBeatTime = 0;
+         }
+         if(visualizerStyle.value === 'digitalRain') {
+            initDigitalRain();
+         }
+         draw();
+         isRunning = true;
+         startButton.textContent = "Visualisierung anhalten";
+         downloadButton.disabled = false;
+      } else {
+         cancelAnimationFrame(animationId);
+         audioElement.pause();
+         if(mediaRecorder && typeof mediaRecorder.pause === 'function') {
+            mediaRecorder.pause();
+         }
+         isRunning = false;
+         startButton.textContent = "Visualisierung starten";
+      }
+    });
+    
+    // Video herunterladen
+    downloadButton.addEventListener('click', function() {
+      cancelAnimationFrame(animationId);
+      if(mediaRecorder && mediaRecorder.state !== 'inactive') {
+         mediaRecorder.stop();
+      }
+      audioElement.pause();
+      isRunning = false;
+      startButton.textContent = "Visualisierung starten";
+    });
+  </script>
+</body>
+</html>
